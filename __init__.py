@@ -2,6 +2,7 @@ import libsonic
 import sqlite3
 import pysftp
 import math
+import os
 import sys
 import re
 import datetime
@@ -44,7 +45,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         upload.func = self.upload
         pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
         pull.func = self.nd_pull
-        return [pull, upload]
+        pushmtime = Subcommand('ndpushmtime', help='Push file times to Navidrome')
+        pushmtime.func = self.nd_push_file_mtime
+        return [pull, upload, pushmtime]
     
     def sftp_connect(self):
         cnopts = pysftp.CnOpts()
@@ -112,6 +115,10 @@ class NavidromeSyncPlugin(BeetsPlugin):
             return False
 
     def nd_pull(self, lib, opts, args):
+        # for item in lib.items():
+        #     pprint(item)
+        #     break
+        # return
         (conn, cur) = self.nd_get_remote_db()
         tracks = []
         rows = dict()
@@ -221,20 +228,62 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
     def nd_get_remote_db(self):
         local_path = "./temp.db"
-        sftp = self.sftp_connect()
-        sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
-        return self.db_connect(local_path)
+        with self.sftp_connect() as sftp:
+            sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
+            return self.db_connect(local_path)
 
+    #not done yet and/or working, taken from another script of mine
+    def nd_push_annotations(self, lib, opts, args):
+        conn = create_connection(db_path)
+        cur = conn.cursor()
+        ids = []
+        paths = []
+        failed = []
+        with open(playlist_path) as csv_file:
+            csv_reader = csv.reader(csv_file, delimiter=';')
+            for row in csv_reader:
+                path = re.search(r"[^\\]*(?=\.\w+$)", row[0])
+                if len(row) > 1:
+                    val = row[1]
+                if path:
+                    path = path[0]
+                else:
+                    failed.append(row[0])
+                # print(path)
+                for row in cur.execute(f'SELECT id, updated_at FROM media_file WHERE path LIKE "%{path}%";'):
+                    id = row[0]
+                    if mode == 'rating':
+                        val = re.sub("T|Z", " ", row[1]).strip()
+                    print(path, id)
+                    if path is not None and path not in paths and id not in ids:
+                        paths.append(path)
+                        ids.append(id)
+                        cur.execute(f'SELECT ann_id FROM annotation WHERE item_id = "{id}"')
+                        rows = cur.fetchall()
+                        if len(rows) == 0:
+                            update_str = f'0, NULL, 0, 1, "{val}");' if mode == 'rating' else f'{val}, NULL, 0, 0, NULL);'
+                            cur.execute(f'''INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
+                                        VALUES(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),"5915f36b-482c-493e-af8d-f4ef1d58b4fa", "{id}", "media_file", '''
+                                        +  update_str)
+                        else:
+                            update_str = f'starred = 1, starred_at = "{val}"' if mode == 'rating' else f'play_count = {val}'
+                            cur.execute('UPDATE annotation SET ' + update_str + f' WHERE item_id = "{id}" AND item_type = "media_file";')
+            print(failed)        
 
-    def nd_push_file_time(self, lib, opts, args):
+    def nd_push_file_mtime(self, lib, opts, args):
+        get_ctime = True
         (conn, cur) = self.nd_get_remote_db()
-        file_info_list = self.collect_file_info(config['directory'].as_str(), args) #filter list passed as tuple
+        items = self.collect_file_info(args) #filter list passed as tuple
+        pprint(items)
+        time_index = 2 if get_ctime else 1
         albumIDs = []
-        for row in file_info_list:
-            path = row[0]
-            t = datetime.datetime.fromtimestamp(int(row[1]), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        for item in items:
+            path = item[0]
+            utc = item[time_index]
             print(path)
-            update_task(conn, [t, path, "media_file"])
+            cur.execute(''' UPDATE "{2}"
+              SET updated_at = "{0}", created_at = REPLACE("{0}", "Z", ".000000000Z")
+              WHERE path LIKE "%{1}%";'''.format(utc, path, "media_file"))
             for row in conn.cursor().execute(f'SELECT album_id FROM media_file WHERE path LIKE "%{path}%";'):
                 albumID = row[0]
                 if albumID not in albumIDs:
@@ -242,10 +291,12 @@ class NavidromeSyncPlugin(BeetsPlugin):
                     albumIDs.append(albumID)
                     conn.cursor().execute(''' UPDATE album
                 SET updated_at = "{0}", created_at = REPLACE("{0}", "Z", ".000000000Z")
-                WHERE id = "{1}";'''.format(t, albumID))
+                WHERE id = "{1}";'''.format(utc, albumID))
 
-    def collect_file_info(self, directory, filter_list=()):
+    def collect_file_info(self, filter_list=()):
+        directory = config['directory'].as_str()
         file_info_list = []
+        def convert_time(t): return datetime.datetime.fromtimestamp(int(t), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
 
         for root, dirs, files in os.walk(directory):
             for file in files:
@@ -253,20 +304,14 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 file_path = os.path.join(root, file)
                 # print (file_path)
                 # Get the file creation time (metadata may not be available on all platforms)
-                try:
-                    created_time = os.path.getctime(file_path)
-                except OSError:
-                    created_time = None
-                try:        
-                    modified_time = os.path.getmtime(file_path)
-                except OSError:
-                    modified_time = None                
+                try: created_time = convert_time(os.path.getctime(file_path))
+                except OSError: created_time = None
+                try: modified_time = convert_time(os.path.getmtime(file_path))
+                except OSError: modified_time = None                
                 if filter_list:
                     match = len(list(filter(lambda e: e.casefold() in file_path.casefold(), filter_list))) > 0 and not re.search(r'\.(png|jpe?g|gif)$', file, re.I)
-                else:
-                    match = True
-                if match:
-                    file_info_list.append((file, modified_time, created_time))
+                else: match = True
+                if match: file_info_list.append((file, modified_time, created_time))
 
         return file_info_list                    
  
