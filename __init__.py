@@ -1,36 +1,24 @@
 import libsonic
 import sqlite3
-import requests
+import pysftp
+import math
+import sys
+import re
+import datetime
+from pprint import pprint
 from beets.plugins import BeetsPlugin
 from beets.ui import Subcommand
 from beets import dbcore
 from beets import config
 from beets.util import (mkdirall, normpath, sanitize_path, syspath,
                         bytestring_path, path_as_posix, displayable_path)
-import pysftp
-import math
-import sys
-import re
-from pprint import pprint
-
-# from stackoverflow somewhere
-def progressbar(x, y):
-    ''' progressbar for the pysftp
-    '''
-    bar_len = 60
-    filled_len = math.ceil(bar_len * x / float(y))
-    percents = math.ceil(100.0 * x / float(y))
-    bar = '=' * filled_len + '-' * (bar_len - filled_len)
-    filesize = f'{math.ceil(y/1024):,} KB' if y > 1024 else f'{y} byte'
-    sys.stdout.write(f'[{bar}] {percents}% {filesize}\r')
-    sys.stdout.flush()
-# [============================================================] 100% 4,342 KB
-
 
 class NavidromeSyncPlugin(BeetsPlugin):
     def __init__(self):
         super().__init__()
         self.config.add({
+            'ratingkey': 'rating',
+            'favoritekey': 'loved',
             'navidrome': {
                 'host': '',
                 'username': '',
@@ -54,7 +42,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
     def commands(self):
         upload = Subcommand('ndupload', help='Sends new tracks matching a query to remote storage')
         upload.func = self.upload
-        pull = Subcommand('ndpull', help='pulls playcounts & starred items from Navidrome')
+        pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
         pull.func = self.nd_pull
         return [pull, upload]
     
@@ -112,6 +100,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             log("Connection failed")
         return
     
+    # Unused at the moment
     def subsonic_api_connect(self):
         host = self.config['navidrome']['host'].get()
         user = self.config['navidrome']['username'].get()
@@ -123,10 +112,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             return False
 
     def nd_pull(self, lib, opts, args):
-        local_path = "./temp.db"
-        sftp = self.sftp_connect()
-        sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
-        (conn, cur) = self.db_connect(local_path)
+        (conn, cur) = self.nd_get_remote_db()
         tracks = []
         rows = dict()
         for row in cur.execute('SELECT item_id, item_type, play_count, rating, starred FROM annotation;'):
@@ -148,10 +134,10 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 "rating": rating,
                 "playCount": playCount
             })
-        self.sync_navidrome_annotations(lib, tracks, self._log)
+        self.process_navidrome_annotations(lib, tracks, self._log)
 
     # Shamelessly lifted process_tracks func from lastimport.py, with some modification
-    def sync_navidrome_annotations(self, lib, tracks, log):
+    def process_navidrome_annotations(self, lib, tracks, log):
         total = len(tracks)
         total_found = 0
         total_fails = 0
@@ -170,12 +156,13 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
             log.debug('query: {0} - {1} ({2})', artist, title, album)
 
-            # First try to query by musicbrainz's trackid
+            # Try with previously saved Navidrome item id
             if item_id:
                 song = lib.items(
                     dbcore.query.MatchQuery('nd_item_id', item_id)
                 ).get()
 
+            # Then try to query by musicbrainz's trackid
             if song is None and trackid:
                 song = lib.items(
                     dbcore.query.MatchQuery('mb_trackid', trackid)
@@ -227,22 +214,71 @@ class NavidromeSyncPlugin(BeetsPlugin):
                     total_found, total, total_fails)
 
         return total_found, total_fails
+    
+
+    def nd_push(self):
+        pass
+
+    def nd_get_remote_db(self):
+        local_path = "./temp.db"
+        sftp = self.sftp_connect()
+        sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
+        return self.db_connect(local_path)
+
+
+    def nd_push_file_time(self, lib, opts, args):
+        (conn, cur) = self.nd_get_remote_db()
+        file_info_list = self.collect_file_info(config['directory'].as_str(), args) #filter list passed as tuple
+        albumIDs = []
+        for row in file_info_list:
+            path = row[0]
+            t = datetime.datetime.fromtimestamp(int(row[1]), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+            print(path)
+            update_task(conn, [t, path, "media_file"])
+            for row in conn.cursor().execute(f'SELECT album_id FROM media_file WHERE path LIKE "%{path}%";'):
+                albumID = row[0]
+                if albumID not in albumIDs:
+                    print(albumID)
+                    albumIDs.append(albumID)
+                    conn.cursor().execute(''' UPDATE album
+                SET updated_at = "{0}", created_at = REPLACE("{0}", "Z", ".000000000Z")
+                WHERE id = "{1}";'''.format(t, albumID))
+
+    def collect_file_info(self, directory, filter_list=()):
+        file_info_list = []
+
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                match = False
+                file_path = os.path.join(root, file)
+                # print (file_path)
+                # Get the file creation time (metadata may not be available on all platforms)
+                try:
+                    created_time = os.path.getctime(file_path)
+                except OSError:
+                    created_time = None
+                try:        
+                    modified_time = os.path.getmtime(file_path)
+                except OSError:
+                    modified_time = None                
+                if filter_list:
+                    match = len(list(filter(lambda e: e.casefold() in file_path.casefold(), filter_list))) > 0 and not re.search(r'\.(png|jpe?g|gif)$', file, re.I)
+                else:
+                    match = True
+                if match:
+                    file_info_list.append((file, modified_time, created_time))
+
+        return file_info_list                    
  
-"""
-beet ls -f "$title: $play_count" "albumartist:low tape" "album:travelogue" play_count-
-
-current:
-Shore Of Stars: 19
-Night Sounds Of St.Petersburg: 16
-Sunshine: 11
-Atlantis: 10
-Nature's Interface: 7
-Isolated Island: 4
-
-after:
-
-"""
-
-
-# from pkgutil import extend_path
-# __path__ = extend_path(__path__, __name__)
+# from stackoverflow somewhere
+def progressbar(x, y):
+    ''' progressbar for the pysftp
+    '''
+    bar_len = 60
+    filled_len = math.ceil(bar_len * x / float(y))
+    percents = math.ceil(100.0 * x / float(y))
+    bar = '=' * filled_len + '-' * (bar_len - filled_len)
+    filesize = f'{math.ceil(y/1024):,} KB' if y > 1024 else f'{y} byte'
+    sys.stdout.write(f'[{bar}] {percents}% {filesize}\r')
+    sys.stdout.flush()
+# [============================================================] 100% 4,342 KB
