@@ -237,12 +237,12 @@ class NavidromeSyncPlugin(BeetsPlugin):
     #not done yet and/or working, taken from another script of mine
     def nd_push_annotations(self, lib, opts, args):
         user_id = "5915f36b-482c-493e-af8d-f4ef1d58b4fa" # CHANGE THIS!!!!!!
-        sql_generate_uuid = '''lower(hex(randomblob(4))) || '-' || 
-                               lower(hex(randomblob(2))) || '-4' || 
-                               substr(lower(hex(randomblob(2))),2) || '-' || 
-                               substr('89ab',abs(random()) % 4 + 1, 1) || 
-                               substr(lower(hex(randomblob(2))),2) || '-' || 
-                               lower(hex(randomblob(6)))'''
+        # sql_generate_uuid = '''lower(hex(randomblob(4))) || '-' || 
+        #                        lower(hex(randomblob(2))) || '-4' || 
+        #                        substr(lower(hex(randomblob(2))),2) || '-' || 
+        #                        substr('89ab',abs(random()) % 4 + 1, 1) || 
+        #                        substr(lower(hex(randomblob(2))),2) || '-' || 
+        #                        lower(hex(randomblob(6)))'''
         rx = re.compile('^playlist:[^\s]+', re.I)
         validArgs = list(filter(lambda e: re.match(rx, e), args))
         all_items = []
@@ -274,11 +274,11 @@ class NavidromeSyncPlugin(BeetsPlugin):
         local_path = config['directory'].as_str()
         for (path, artist, title, mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, play_count, rating, loved, mtime) in all_items:
             path = path.replace('\\', '/').replace(local_path, '')
-            cur.execute('''SELECT id, updated_at, mbz_track_id
-                           FROM media_file 
-                           WHERE (mbz_track_id = ?)
-                           OR (artist = ? AND title = ?)
-                           OR (path LIKE ?);''',
+            cur.execute(''' SELECT id, updated_at, mbz_track_id
+                            FROM media_file 
+                            WHERE (mbz_track_id = ?)
+                            OR (artist = ? AND title = ?)
+                            OR (path LIKE ?);''',
                            (mb_trackid, artist, title, f'%{path}%'))
             (id, updated, mbz_track_id) = cur.fetchone() or (None, None, None)
             if id is not None and path not in paths and id not in ids:
@@ -288,25 +288,31 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 print(f'matched: {path} to {id}')
                 mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if loved else "NULL"
                 loved = 1 if loved == 'True' else 0
-                cur.execute(f'SELECT ann_id FROM annotation WHERE item_id = "{id}"')
+                cur.execute('SELECT ann_id FROM annotation WHERE item_id = ?', (id,))
                 rows = cur.fetchall()
                 if len(rows) == 0:
-                    cur.execute('''INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
-                                   VALUES(?,?,?, "media_file", ?, NULL, ?, ?, ?);''',
-                                          (sql_generate_uuid, user_id, id, play_count, rating, loved, mtime))
+                    cur.execute(''' INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
+                                    VALUES  (lower(hex(randomblob(4))) || '-' || 
+                                            lower(hex(randomblob(2))) || '-4' || 
+                                            substr(lower(hex(randomblob(2))),2) || '-' || 
+                                            substr('89ab',abs(random()) % 4 + 1, 1) || 
+                                            substr(lower(hex(randomblob(2))),2) || '-' || 
+                                            lower(hex(randomblob(6))),
+                                            ?, ?, "media_file", ?, NULL, ?, ?, ?);''',
+                                          (user_id, id, play_count, rating, loved, mtime))
                 else:
-                    cur.execute('''UPDATE annotation 
-                                   SET starred = ?, 
-                                       starred_at = ?, 
-                                       play_count = ?,
-                                       rating = ? 
+                    cur.execute(''' UPDATE annotation 
+                                    SET starred = ?, 
+                                        starred_at = ?, 
+                                        play_count = ?,
+                                        rating = ? 
                                     WHERE item_id = ?
                                     AND item_type = "media_file";'''
                                 , (loved, mtime, play_count, rating, id))
             else:
                 print(f'failed to match:{artist}, {title}, {path}, {mb_trackid}')
             if (id is not None and (not mbz_track_id or mbz_track_id != mb_trackid)):
-                cur.execute('''UPDATE media_file
+                cur.execute(''' UPDATE media_file
                                 SET mbz_track_id = ?,
                                     mbz_album_id = ?,
                                     mbz_artist_id = ?,
