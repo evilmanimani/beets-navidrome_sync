@@ -47,7 +47,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         pull.func = self.nd_pull
         pushmtime = Subcommand('ndpushmtime', help='Push file times to Navidrome')
         pushmtime.func = self.nd_push_file_mtime
-        return [pull, upload, pushmtime]
+        push_annotation = Subcommand('ndpushannotation', help='Push file times to Navidrome')
+        push_annotation.func = self.nd_push_annotations
+        return [pull, upload, pushmtime, push_annotation]
     
     def sftp_connect(self):
         cnopts = pysftp.CnOpts()
@@ -234,41 +236,88 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
     #not done yet and/or working, taken from another script of mine
     def nd_push_annotations(self, lib, opts, args):
-        conn = create_connection(db_path)
-        cur = conn.cursor()
+        user_id = "5915f36b-482c-493e-af8d-f4ef1d58b4fa" # CHANGE THIS!!!!!!
+        sql_generate_uuid = '''lower(hex(randomblob(4))) || '-' || 
+                               lower(hex(randomblob(2))) || '-4' || 
+                               substr(lower(hex(randomblob(2))),2) || '-' || 
+                               substr('89ab',abs(random()) % 4 + 1, 1) || 
+                               substr(lower(hex(randomblob(2))),2) || '-' || 
+                               lower(hex(randomblob(6)))'''
+        rx = re.compile('^playlist:[^\s]+', re.I)
+        validArgs = list(filter(lambda e: re.match(rx, e), args))
+        all_items = []
+        for arg in validArgs:
+            items = []
+            for i in lib.items(arg):
+                items.append((
+                    i['path'].decode('utf-8'),
+                    i['artist'],
+                    i['title'],
+                    i['mb_trackid'],
+                    i['mb_albumid'],
+                    i['mb_artistid'],
+                    i['mb_albumartistid'],
+                    i['albumtype'],
+                    i['mb_releasetrackid'],
+                    i['play_count'] if 'play_count' in i else 0,
+                    i['rating'] if 'rating' in i else 0,
+                    i['loved'] if 'loved' in i else 'False',
+                    i['mtime'] if 'mtime' in i else 'NULL'
+                ))
+            all_items.extend(items)
+        if len(all_items) == 0:
+            return
+        # (conn, cur) = self.nd_get_remote_db()
+        (conn, cur) = self.db_connect(r'C:\Users\mcleo\temp.db')
         ids = []
         paths = []
-        failed = []
-        with open(playlist_path) as csv_file:
-            csv_reader = csv.reader(csv_file, delimiter=';')
-            for row in csv_reader:
-                path = re.search(r"[^\\]*(?=\.\w+$)", row[0])
-                if len(row) > 1:
-                    val = row[1]
-                if path:
-                    path = path[0]
+        local_path = config['directory'].as_str()
+        for (path, artist, title, mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, play_count, rating, loved, mtime) in all_items:
+            path = path.replace('\\', '/').replace(local_path, '')
+            cur.execute('''SELECT id, updated_at, mbz_track_id
+                           FROM media_file 
+                           WHERE (mbz_track_id = ?)
+                           OR (artist = ? AND title = ?)
+                           OR (path LIKE ?);''',
+                           (mb_trackid, artist, title, f'%{path}%'))
+            (id, updated, mbz_track_id) = cur.fetchone() or (None, None, None)
+            if id is not None and path not in paths and id not in ids:
+                paths.append(path)
+                ids.append(id)
+                updated = re.sub("T|Z", " ", updated).strip()
+                print(f'matched: {path} to {id}')
+                mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if loved else "NULL"
+                loved = 1 if loved == 'True' else 0
+                cur.execute(f'SELECT ann_id FROM annotation WHERE item_id = "{id}"')
+                rows = cur.fetchall()
+                if len(rows) == 0:
+                    cur.execute('''INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
+                                   VALUES(?,?,?, "media_file", ?, NULL, ?, ?, ?);''',
+                                          (sql_generate_uuid, user_id, id, play_count, rating, loved, mtime))
                 else:
-                    failed.append(row[0])
-                # print(path)
-                for row in cur.execute(f'SELECT id, updated_at FROM media_file WHERE path LIKE "%{path}%";'):
-                    id = row[0]
-                    if mode == 'rating':
-                        val = re.sub("T|Z", " ", row[1]).strip()
-                    print(path, id)
-                    if path is not None and path not in paths and id not in ids:
-                        paths.append(path)
-                        ids.append(id)
-                        cur.execute(f'SELECT ann_id FROM annotation WHERE item_id = "{id}"')
-                        rows = cur.fetchall()
-                        if len(rows) == 0:
-                            update_str = f'0, NULL, 0, 1, "{val}");' if mode == 'rating' else f'{val}, NULL, 0, 0, NULL);'
-                            cur.execute(f'''INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
-                                        VALUES(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),"5915f36b-482c-493e-af8d-f4ef1d58b4fa", "{id}", "media_file", '''
-                                        +  update_str)
-                        else:
-                            update_str = f'starred = 1, starred_at = "{val}"' if mode == 'rating' else f'play_count = {val}'
-                            cur.execute('UPDATE annotation SET ' + update_str + f' WHERE item_id = "{id}" AND item_type = "media_file";')
-            print(failed)        
+                    cur.execute('''UPDATE annotation 
+                                   SET starred = ?, 
+                                       starred_at = ?, 
+                                       play_count = ?,
+                                       rating = ? 
+                                    WHERE item_id = ?
+                                    AND item_type = "media_file";'''
+                                , (loved, mtime, play_count, rating, id))
+            else:
+                print(f'failed to match:{artist}, {title}, {path}, {mb_trackid}')
+            if (id is not None and (not mbz_track_id or mbz_track_id != mb_trackid)):
+                cur.execute('''UPDATE media_file
+                                SET mbz_track_id = ?,
+                                    mbz_album_id = ?,
+                                    mbz_artist_id = ?,
+                                    mbz_album_artist_id = ?,
+                                    mbz_album_type = ?,
+                                    mbz_release_track_id = ?
+                                WHERE id = ?''', 
+                                (mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, id))
+        # if len(failed) > 0: print(failed)
+        conn.commit()
+        conn.close()
 
     def nd_push_file_mtime(self, lib, opts, args):
         get_ctime = True
@@ -296,7 +345,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
     def collect_file_info(self, filter_list=()):
         directory = config['directory'].as_str()
         file_info_list = []
-        def convert_time(t): return datetime.datetime.fromtimestamp(int(t), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
 
         for root, dirs, files in os.walk(directory):
             for file in files:
@@ -314,7 +362,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 if match: file_info_list.append((file, modified_time, created_time))
 
         return file_info_list                    
- 
+
+def convert_time(t): return datetime.datetime.fromtimestamp(int(t), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+
 # from stackoverflow somewhere
 def progressbar(x, y):
     ''' progressbar for the pysftp
