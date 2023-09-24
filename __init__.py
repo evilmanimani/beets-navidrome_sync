@@ -45,11 +45,34 @@ class NavidromeSyncPlugin(BeetsPlugin):
         upload.func = self.upload
         pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
         pull.func = self.nd_pull
-        pushmtime = Subcommand('ndpushmtime', help='Push file times to Navidrome')
-        pushmtime.func = self.nd_push_file_mtime
-        push_annotation = Subcommand('ndpushannotation', help='Push file times to Navidrome')
-        push_annotation.func = self.nd_push_annotations
-        return [pull, upload, pushmtime, push_annotation]
+        # pull.parser.add_option(
+        #     '-p', '--pretend', action='store_true',
+        #     help="display query results but don't write playlist files."
+        # )
+        push = Subcommand('ndpush', help='Push file times to Navidrome')
+        push.parser.add_option(
+            '-t', '--time', action='store_true',
+            help="push directory file times to Navidrome db."
+        )
+        push.parser.add_option(
+            '-c', '--ctime', action='store_true', default=False,
+            help="additional option for --time, uses created time (on Windows) rather than modified time."
+        )
+        push.parser.add_option(
+            '-m', '--mb', action='store_true',
+            help="push MusicBrainz data from beets to Navidrome db."
+        )
+        push.func = self.nd_push
+        # push_annotation = Subcommand('ndpushannotation', help='Push file times to Navidrome')
+        # push_annotation.func = self.nd_push_annotations
+        return [push, pull, upload]
+    
+    def nd_push(self, lib, opts, args):
+        print(opts, args)
+        if opts.time:
+            self.nd_push_file_mtime(opts.ctime, args)
+        # print(opts)
+        return
     
     def sftp_connect(self):
         cnopts = pysftp.CnOpts()
@@ -224,10 +247,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
         return total_found, total_fails
     
-
-    def nd_push(self):
-        pass
-
     def nd_get_remote_db(self):
         local_path = "./temp.db"
         with self.sftp_connect() as sftp:
@@ -325,8 +344,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         conn.commit()
         conn.close()
 
-    def nd_push_file_mtime(self, lib, opts, args):
-        get_ctime = True
+    def nd_push_file_mtime(self, get_ctime, args):
+        print(get_ctime, args)
+        return
         (conn, cur) = self.nd_get_remote_db()
         items = self.collect_file_info(args) #filter list passed as tuple
         pprint(items)
