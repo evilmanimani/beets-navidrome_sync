@@ -45,13 +45,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         upload.func = self.upload
         pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
         pull.func = self.nd_pull
-        # pull.parser.add_option(
-        #     '-p', '--pretend', action='store_true',
-        #     help="display query results but don't write playlist files."
-        # )
         push = Subcommand('ndpush', help='Push file times to Navidrome')
         push.parser.add_option(
-            '-t', '--time', action='store_true',
+            '-t', '--time', action='store_true', default=False,
             help="push directory file times to Navidrome db."
         )
         push.parser.add_option(
@@ -59,7 +55,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             help="additional option for --time, uses created time (on Windows) rather than modified time."
         )
         push.parser.add_option(
-            '-m', '--mb', action='store_true',
+            '-m', '--mb', action='store_true', default=True,
             help="push MusicBrainz data from beets to Navidrome db."
         )
         push.parser.add_option(
@@ -67,7 +63,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             help="Don't push MusicBrainz data from beets to Navidrome db."
         )
         push.parser.add_option(
-            '-l', '--loved', action='store_true',
+            '-l', '--loved', action='store_true', default=True,
             help="Push loved (starred) tracks"
         )
         push.parser.add_option(
@@ -75,15 +71,15 @@ class NavidromeSyncPlugin(BeetsPlugin):
             help="Don't push loved (starred) tracks"
         )
         push.parser.add_option(
-            '-p', '--play-counts', action='store_true',
+            '-p', '--playcounts', action='store_true', default=True,
             help="Push play counts"
         )
         push.parser.add_option(
-            '-P', '--noplay-counts', action='store_false', dest='play-counts',
+            '-P', '--noplaycounts', action='store_false', dest='playcounts',
             help="Don't push play counts"
         )
         push.parser.add_option(
-            '-r', '--ratings', action='store_true',
+            '-r', '--ratings', action='store_true', default=True,
             help="Push ratings"
         )
         push.parser.add_option(
@@ -91,17 +87,13 @@ class NavidromeSyncPlugin(BeetsPlugin):
             help="Don't push ratings"
         )
         push.func = self.nd_push
-        # push_annotation = Subcommand('ndpushannotation', help='Push file times to Navidrome')
-        # push_annotation.func = self.nd_push_annotations
         return [push, pull, upload]
     
     def nd_push(self, lib, opts, args):
         print(opts, args)
         if opts.time:
             self.nd_push_file_mtime(opts.ctime, args)
-        if opts.mb:
-            what = 'butt'
-        # print(opts)
+        self.nd_push_annotations(lib, opts, args)
         return
     
     def sftp_connect(self):
@@ -172,10 +164,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
     """
 
     def nd_pull(self, lib, opts, args):
-        # for item in lib.items():
-        #     pprint(item)
-        #     break
-        # return
         (conn, cur) = self.nd_get_remote_db()
         tracks = []
         rows = dict()
@@ -288,6 +276,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
     #not done yet and/or working, taken from another script of mine
     def nd_push_annotations(self, lib, opts, args):
         user_id = "5915f36b-482c-493e-af8d-f4ef1d58b4fa" # CHANGE THIS!!!!!!
+        if not opts.mb and not opts.loved and not opts.playcounts and not opts.ratings:
+            self._log.info("At least one of either --mb, --loved, --playcounts, or --ratings must be enabled to process!")
+            return
         rx = re.compile('^playlist:[^\s]+', re.I)
         validArgs = list(filter(lambda e: re.match(rx, e), args))
         all_items = []
@@ -340,13 +331,15 @@ class NavidromeSyncPlugin(BeetsPlugin):
                             OR (path LIKE ?);''',
                            (mb_trackid, artist, title, f'%{path}%'))
             (id, updated, mbz_track_id) = cur.fetchone() or (None, None, None)
-            if id is not None and path not in paths and id not in ids:
+            if id is not None and path not in paths and id not in ids and (opts.loved or opts.playcounts or opts.ratings):
                 paths.append(path)
                 ids.append(id)
                 updated = re.sub("T|Z", " ", updated).strip()
                 print(f'matched: {path} to {id}')
-                mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if loved else "NULL"
-                loved = 1 if loved == 'True' else 0
+                mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if loved and opts.loved else "NULL"
+                loved = 1 if loved == 'True' and opts.loved else 0
+                rating = rating if opts.ratings else 0
+                play_count = play_count if opts.playcounts else 0
                 cur.execute('SELECT ann_id FROM annotation WHERE item_id = ?', (id,))
                 rows = cur.fetchall()
                 if len(rows) == 0:
@@ -370,7 +363,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
                                 , (loved, mtime, play_count, rating, id))
             else:
                 print(f'failed to match:{artist}, {title}, {path}, {mb_trackid}')
-            if (id is not None and (not mbz_track_id or mbz_track_id != mb_trackid)):
+            if (id is not None and opts.mb and (not mbz_track_id or mbz_track_id != mb_trackid)):
                 cur.execute(''' UPDATE media_file
                                 SET mbz_track_id = ?,
                                     mbz_album_id = ?,
@@ -380,13 +373,10 @@ class NavidromeSyncPlugin(BeetsPlugin):
                                     mbz_release_track_id = ?
                                 WHERE id = ?''', 
                                 (mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, id))
-        # if len(failed) > 0: print(failed)
         conn.commit()
         conn.close()
 
     def nd_push_file_mtime(self, get_ctime, args):
-        print(get_ctime, args)
-        return
         (conn, cur) = self.nd_get_remote_db()
         items = self.collect_file_info(args) #filter list passed as tuple
         pprint(items)
@@ -404,14 +394,17 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 if albumID not in albumIDs:
                     print(albumID)
                     albumIDs.append(albumID)
-                    conn.cursor().execute(''' UPDATE album
-                SET updated_at = "{0}", created_at = REPLACE("{0}", "Z", ".000000000Z")
-                WHERE id = "{1}";'''.format(utc, albumID))
+                    conn.cursor().execute(
+                            ''' UPDATE album
+                                SET updated_at = :time, created_at = REPLACE(:time, "Z", ".000000000Z")
+                                WHERE id = :id;''',
+                                { "time": utc, "id": albumID }
+                            )
 
     def collect_file_info(self, filter_list=()):
         directory = config['directory'].as_str()
         file_info_list = []
-
+        re_image = re.compile(r'\.(png|jpe?g|gif)$', re.I)
         for root, dirs, files in os.walk(directory):
             for file in files:
                 match = False
@@ -423,7 +416,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 try: modified_time = convert_time(os.path.getmtime(file_path))
                 except OSError: modified_time = None                
                 if filter_list:
-                    match = len(list(filter(lambda e: e.casefold() in file_path.casefold(), filter_list))) > 0 and not re.search(r'\.(png|jpe?g|gif)$', file, re.I)
+                    match = len(list(filter(lambda e: e.casefold() in file_path.casefold(), filter_list))) > 0 and not re.search(re_image, file)
                 else: match = True
                 if match: file_info_list.append((file, modified_time, created_time))
 
