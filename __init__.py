@@ -1,4 +1,4 @@
-import libsonic
+# import libsonic
 import sqlite3
 import pysftp
 import math
@@ -62,6 +62,34 @@ class NavidromeSyncPlugin(BeetsPlugin):
             '-m', '--mb', action='store_true',
             help="push MusicBrainz data from beets to Navidrome db."
         )
+        push.parser.add_option(
+            '-M', '--nomb', action='store_false', dest='mb',
+            help="Don't push MusicBrainz data from beets to Navidrome db."
+        )
+        push.parser.add_option(
+            '-l', '--loved', action='store_true',
+            help="Push loved (starred) tracks"
+        )
+        push.parser.add_option(
+            '-L', '--noloved', action='store_false', dest='loved',
+            help="Don't push loved (starred) tracks"
+        )
+        push.parser.add_option(
+            '-p', '--play-counts', action='store_true',
+            help="Push play counts"
+        )
+        push.parser.add_option(
+            '-P', '--noplay-counts', action='store_false', dest='play-counts',
+            help="Don't push play counts"
+        )
+        push.parser.add_option(
+            '-r', '--ratings', action='store_true',
+            help="Push ratings"
+        )
+        push.parser.add_option(
+            '-R', '--noratings', action='store_false', dest='ratings',
+            help="Don't push ratings"
+        )
         push.func = self.nd_push
         # push_annotation = Subcommand('ndpushannotation', help='Push file times to Navidrome')
         # push_annotation.func = self.nd_push_annotations
@@ -71,6 +99,8 @@ class NavidromeSyncPlugin(BeetsPlugin):
         print(opts, args)
         if opts.time:
             self.nd_push_file_mtime(opts.ctime, args)
+        if opts.mb:
+            what = 'butt'
         # print(opts)
         return
     
@@ -128,6 +158,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             log("Connection failed")
         return
     
+    """ 
     # Unused at the moment
     def subsonic_api_connect(self):
         host = self.config['navidrome']['host'].get()
@@ -138,6 +169,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             return libsonic.Connection(host , user, passw, port=port)
         else:
             return False
+    """
 
     def nd_pull(self, lib, opts, args):
         # for item in lib.items():
@@ -256,12 +288,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
     #not done yet and/or working, taken from another script of mine
     def nd_push_annotations(self, lib, opts, args):
         user_id = "5915f36b-482c-493e-af8d-f4ef1d58b4fa" # CHANGE THIS!!!!!!
-        # sql_generate_uuid = '''lower(hex(randomblob(4))) || '-' || 
-        #                        lower(hex(randomblob(2))) || '-4' || 
-        #                        substr(lower(hex(randomblob(2))),2) || '-' || 
-        #                        substr('89ab',abs(random()) % 4 + 1, 1) || 
-        #                        substr(lower(hex(randomblob(2))),2) || '-' || 
-        #                        lower(hex(randomblob(6)))'''
         rx = re.compile('^playlist:[^\s]+', re.I)
         validArgs = list(filter(lambda e: re.match(rx, e), args))
         all_items = []
@@ -291,7 +317,21 @@ class NavidromeSyncPlugin(BeetsPlugin):
         ids = []
         paths = []
         local_path = config['directory'].as_str()
-        for (path, artist, title, mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, play_count, rating, loved, mtime) in all_items:
+        for (
+                path, 
+                artist, 
+                title, 
+                mb_trackid, 
+                mb_albumid, 
+                mb_artistid, 
+                mb_albumartistid, 
+                albumtype, 
+                mb_releasetrackid, 
+                play_count, 
+                rating, 
+                loved, 
+                mtime
+            ) in all_items:
             path = path.replace('\\', '/').replace(local_path, '')
             cur.execute(''' SELECT id, updated_at, mbz_track_id
                             FROM media_file 

@@ -1,5 +1,4 @@
-.vscode/launch.json
-.vscode/settings.json
+.vscode*
 navidrome_sync.py.old
-__pycache__/__init__.cpython-310.pyc
 temp.db*
+__pycache__/*
