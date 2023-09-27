@@ -1,4 +1,7 @@
 .vscode*
-navidrome_sync.py.old
-temp.db*
-__pycache__/*
+*.old
+__pycache__
+*.db
+*.txt
+*wal
+*shm
