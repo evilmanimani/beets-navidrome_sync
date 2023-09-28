@@ -1,12 +1,25 @@
-import math, sqlite3, os, sys, re, datetime
+'''
+TODO:
+- Automatic upload following import option
+- Confirmation prompt for imports
+- Sync starred back to LastFM (ListenBrainz?)
+- Maybe faster SFTP upload if I can figure it out, seems capped at 500kibps ... something to do with chunks/parallelizing uploads??
+  probably not though :( [sum1 halp]
+'''
+import os
+import sys
+# Get the absolute path of the current directory
+import sqlite3, os, sys, re, datetime
 import libsonic
 import pysftp
+from functional import seq
 from beets.plugins import BeetsPlugin
 from beets.ui import (Subcommand, decargs)
-from beets import dbcore
-from beets import config
-from beets.util import (mkdirall, normpath, sanitize_path, syspath,
-                        bytestring_path, path_as_posix, displayable_path)
+from beets import dbcore, config
+from sftpuploader import SftpUploader
+from beets.util import (bytestring_path, path_as_posix)
+
+
 
 class NavidromeSyncPlugin(BeetsPlugin):
     def __init__(self):
@@ -15,6 +28,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             'db_path': '',
             'db_user': '',
             'temp_path': "./temp.db",
+            "push-annotations": True,
             # 'ratingkey': 'rating',
             # 'favoritekey': 'starred',
             'navidrome': {
@@ -24,6 +38,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 'port': 443,
             },
             'sftp': {
+                'auto': False,
                 'host': '',
                 'username': '',
                 'password': '',
@@ -36,6 +51,25 @@ class NavidromeSyncPlugin(BeetsPlugin):
         self.config['navidrome']['password'].redact = True
         self.config['sftp']['username'].redact = True
         self.config['sftp']['password'].redact = True
+                        
+        sftp_config = {
+            'host': self.config['sftp']['host'].get(),
+            'username': self.config['sftp']['username'].get(),
+            'password': self.config['sftp']['password'].get(),
+            'port': self.config['sftp']['port'].get(),
+            'directory': self.config['sftp']['directory'].get(),
+            'local_directory': config['directory'].as_str(),
+        }
+        self.uploader = SftpUploader(sftp_config, self._log)
+        if self.config['sftp']['auto'].get() and self.config['sftp']['host'].get() and self.config['sftp']['username'].get() and self.config['sftp']['password'].get() and self.config['sftp']['directory'].get():
+            self.register_listener('import_task_files', self.sftp_auto)
+
+    def sftp_auto(self, task, session):
+        items = task.items if task.is_album else [task.item] 
+        self._log.info('Auto upload enabled, uploading to remote storage...')
+        self.uploader.upload(items, None, None)
+        self._log.info('Upload complete')
+
 
     def commands(self):
         nddb = Subcommand('nddb', help="Update remote DB")
@@ -45,64 +79,35 @@ class NavidromeSyncPlugin(BeetsPlugin):
         pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
         pull.func = self.nd_pull
         push = Subcommand('ndpush', help='Push file times to Navidrome')
-        push.parser.add_option(
-            '-t', '--time', action='store_true', default=False,
-            help="push directory file times to Navidrome db."
-        )
-        push.parser.add_option(
-            '-c', '--ctime', action='store_true', default=False,
-            help="additional option for --time, uses created time (on Windows) rather than modified time."
-        )
-        push.parser.add_option(
-            '-m', '--mb', action='store_true', default=True,
-            help="push MusicBrainz data from beets to Navidrome db."
-        )
-        push.parser.add_option(
-            '-M', '--nomb', action='store_false', dest='mb',
-            help="Don't push MusicBrainz data from beets to Navidrome db."
-        )
-        push.parser.add_option(
-            '-s', '--starred', action='store_true', default=True,
-            help="Push starred tracks"
-        )
-        push.parser.add_option(
-            '-S', '--nostarred', action='store_false', dest='starred',
-            help="Don't push starred tracks"
-        )
-        push.parser.add_option(
-            '-p', '--playcounts', action='store_true', default=True,
-            help="Push play counts"
-        )
-        push.parser.add_option(
-            '-P', '--noplaycounts', action='store_false', dest='playcounts',
-            help="Don't push play counts"
-        )
-        push.parser.add_option(
-            '-r', '--ratings', action='store_true', default=True,
-            help="Push ratings"
-        )
-        push.parser.add_option(
-            '-R', '--noratings', action='store_false', dest='ratings',
-            help="Don't push ratings"
-        )
-        push.parser.add_option(
-            '-l', '--log', dest='log_path',
-            help="Log missed items to file"
-        )
+        push.parser.add_option( '-t', '--time',          action='store_true',    default=False,      help="push directory file times to Navidrome db.")
+        push.parser.add_option( '-c', '--ctime',         action='store_true',    default=False,      help="additional option for --time, uses created time (on Windows) rather than modified time.")
+        push.parser.add_option( '-b', '--mb',            action='store_true',    default=True,       help="push MusicBrainz data from beets to Navidrome db.")
+        push.parser.add_option( '-B', '--no-mb',         action='store_false',   dest='mb',          help="Don't push MusicBrainz data from beets to Navidrome db.")
+        push.parser.add_option( '-s', '--starred',       action='store_true',    default=True,       help="Push starred tracks")
+        push.parser.add_option( '-S', '--no-starred',    action='store_false',   dest='starred',     help="Don't push starred tracks")
+        push.parser.add_option( '-p', '--playcounts',    action='store_true',    default=True,       help="Push play counts")
+        push.parser.add_option( '-P', '--no-playcounts', action='store_false',   dest='playcounts',  help="Don't push play counts")
+        push.parser.add_option( '-r', '--ratings',       action='store_true',    default=True,       help="Push ratings")
+        push.parser.add_option( '-R', '--no-ratings',    action='store_false',   dest='ratings',     help="Don't push ratings")
+        push.parser.add_option( '-l', '--log',                                   dest='log_path',    help="Log missed items to file")
+        push.parser.add_option( '-A', '--no-annotations',action='store_true',    default=False,      help="Don't update any annotations (play counts, ratings, starred, MusicBrainz data)")
         push.func = self.nd_push
         return [push, pull, upload, nddb]
     
     def nd_push(self, lib, opts, args):
         if opts.time:
             self.nd_push_file_mtime(opts.ctime, args)
-        self.nd_push_annotations(lib, opts, args)
+        if self.config['push-annotations']:
+            print('enabled in config')
+            if not opts.no_annotations: 
+                print('not disabled in command')
+                self.nd_push_annotations(lib, opts, args)
         return
 
     def nd_push_annotations(self, lib, opts, args):
         if not opts.mb and not opts.starred and not opts.playcounts and not opts.ratings:
             self._log.info("At least one of either --mb, --starred, --playcounts, or --ratings must be enabled to process!")
             return
-        # (conn, cur) = self.nd_get_remote_db()
         db_path = self.config['db_path'].as_str()
         if not db_path:
             self._log.info('Configure a valid local db_path to continue. Exiting...')
@@ -128,11 +133,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
                     ('musicbrainz data, ' if opts.mb else '') +
                     'to Navidrome DB'                         
         )
-        # rx = re.compile('^playlist:[^\s]+', re.I)
-        # validArgs = list(filter(lambda e: re.match(rx, e), args))
-        # validArgs = [args]
-        # for arg in validArgs:
-            # items = []
         all_items = []
         for i in lib.items(args):
             all_items.append((
@@ -200,7 +200,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
                     paths.append(path)
                     ids.append(id)
                     updated_at = re.sub("T|Z", " ", updated_at).strip()
-                    # print(f'matched: {path} to {id}')
                     mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if starred and opts.starred else "NULL"
                     starred = 1 if starred == 'True' and opts.starred else 0
                     rating = rating if opts.ratings else 0
@@ -248,10 +247,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         conn.commit()
         conn.close()
 
-
     def nd_push_file_mtime(self, get_ctime, args):
         self._log.info('Pushing ' + ('ctime' if get_ctime else 'mtime') + ' to date-added field for media files in Navidrome DB')
-        # (conn, cur) = self.nd_get_remote_db()
+        # (conn, cur) = self.get_remote_db()
         (conn, cur) = self.db_connect(self.config['db_path'].as_str())
         items = self.collect_file_info(args) #filter list passed as tuple
         # pprint(items)
@@ -265,7 +263,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
             path = item[0]
             utc = item[time_index]
             utc_m = utc.replace('Z', '.000000000Z')
-            # print(path)
             cur.execute(
                 ''' UPDATE media_file 
                     SET updated_at = :utc, created_at = :utc_m
@@ -278,7 +275,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 matched += 1
                 albumID = row[0]
                 if albumID not in albumIDs:
-                    # print(albumID)
                     albumIDs.append(albumID)
                     cur.execute(
                             ''' UPDATE album
@@ -291,7 +287,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
         conn.commit()
         conn.close()
         print('')
-
+    
     def sftp_connect(self):
         cnopts = pysftp.CnOpts()
         cnopts.hostkeys = None
@@ -312,39 +308,15 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
         return (conn, cur)
 
-    def sftp_upload(self, sftp, local, dest):
-        self._log.info('Uploading: {}', local)
-        sftp.makedirs(re.sub("/[^/]+$", "",dest))
-        sftp.put(localpath=local, remotepath=dest, preserve_mtime=True, callback=lambda x,y: progressbar(x,y))
-        print("")
-        return
-
     def format_dest_path(self, path):
         local_path = bytestring_path(config['directory'].as_str())
         dest_path = bytestring_path(self.config['sftp']['directory'].as_str())
         local = path_as_posix(path)
         dest = local.replace(local_path, dest_path)
         return dest.decode("utf-8")
-
+    
     def upload(self, lib, opts, args):
-        log = self._log.info
-
-        items = lib.items(args)
-        sftp = self.sftp_connect()
-        albumart = set()
-        if sftp:
-            for i in items:
-                if i['artpath'] and i['album'] not in albumart:
-                    local = i['artpath']
-                    albumart.add(i['album'])
-                    self.sftp_upload(sftp, local, self.format_dest_path(local))
-                local = i['path']
-                self.sftp_upload(sftp, local, self.format_dest_path(local))
-            log("Upload complete!")
-            sftp.close()
-        else:
-            log("Connection failed")
-        return
+        self.uploader.upload(lib, opts, args)
     
     def nd_api(self, lib, opts, args):
         conn = self.subsonic_api_connect()
@@ -362,7 +334,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             return False
 
     def nd_pull(self, lib, opts, args):
-        (conn, cur) = self.nd_get_remote_db()
+        (conn, cur) = self.get_remote_db()
         tracks = []
         rows = dict()
         for row in cur.execute('SELECT item_id, item_type, play_count, rating, starred FROM annotation;'):
@@ -396,7 +368,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
         for num in range(0, total):
             song = None
             trackid = None
-            # trackid = tracks[num]['mbid'].strip()
             item_id = tracks[num]['nd_item_id'].strip()
             artist = tracks[num]['artist'].strip()
             title = tracks[num]['title'].strip()
@@ -441,7 +412,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 count = int(song.get('play_count', 0))
                 new_count = 0
                 if 'playCount' in tracks[num]:
-                    # log.info("{} - {}", tracks[num]['title'], tracks[num]['playCount'])
                     new_count = int(tracks[num]['playCount'])
                 log.debug('match: {0} - {1} ({2}) '
                         'updating: play_count {3} => {4}',
@@ -465,7 +435,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
         return total_found, total_fails
     
-    def nd_get_remote_db(self):
+    def get_remote_db(self, *rest):
         local_path = self.config['temp_path'].as_str()
         with self.sftp_connect() as sftp:
             sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
@@ -534,15 +504,27 @@ def update_progress(**kwargs): # =total, matched, updated, missed):
     sys.stdout.write(f'  --- {pad_int(matched)} of {pad_int(total)} matched ({updated_str}{pad_int(missed)} missed) - {str(int(per)).rjust(3)}% complete ---\r')
     sys.stdout.flush()
 
-# from stackoverflow somewhere
-def progressbar(x, y):
-    ''' progressbar for the pysftp
-    '''
-    bar_len = 60
-    filled_len = math.ceil(bar_len * x / float(y))
-    percents = math.ceil(100.0 * x / float(y))
-    bar = '=' * filled_len + '-' * (bar_len - filled_len)
-    filesize = f'{math.ceil(y/1024):,} KB' if y > 1024 else f'{y} byte'
-    sys.stdout.write(f'[{bar}] {percents}% {filesize}\r')
-    sys.stdout.flush()
-# [============================================================] 100% 4,342 KB
+# def viewBar(a,b):
+#     # original version
+#     res = a/int(b)*100
+#     sys.stdout.write('\rComplete precent: %.2f %%' % (res))
+#     sys.stdout.flush()
+
+# def tqdmWrapViewBar(*args, **kwargs):
+#     try:
+#         from tqdm import tqdm
+#     except ImportError:
+#         # tqdm not installed - construct and return dummy/basic versions
+#         class Foo():
+#             @classmethod
+#             def close(*c):
+#                 pass
+#         return viewBar, Foo
+#     else:
+#         pbar = tqdm(*args, **kwargs)  # make a progressbar
+#         last = [0]  # last known iteration, start at 0
+#         def viewBar2(a, b):
+#             pbar.total = int(b)
+#             pbar.update(int(a - last[0]))  # update pbar with increment
+#             last[0] = a  # update last known iteration
+#         return viewBar2, pbar  # return callback, qdmInstance
