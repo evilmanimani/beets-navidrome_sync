@@ -1,7 +1,5 @@
 # beets-navidrome_sync
-Work in progress syncing plugin between beets and Navidrome 
-
-probably broken atm in some ways, but works on Windows (lol), testing on other OSs would be appreciated.
+Work in progress syncing plugin between beets and Navidrome, works well enough for my own use on Windows, needs testing on *nix.
 
  **So far, it can do the following:**
 - Recursively scan your music folder, grab all the modified (or created (on Windows only apparently??)), and update your Navidrome Created/Updated times to these dates, i.e. set your 'Recently added' order to that of file creation
@@ -9,14 +7,9 @@ probably broken atm in some ways, but works on Windows (lol), testing on other O
 - 2 way syncing - either push, or pull annotations (starred, play counts, ratings) between Navidrome and beets
 - Push MusicBrainz metadata into the Navidrome DB
 - Will attempt to match tracks by a few means, either by MusicBrainz track ID, path, artist & title, or if all else fails, will try a sort of fuzzy search which matches individual segments of the artist, title, and album to the 'full_text' field in Navidrome's DB, as a result matching success is quite high from initial tests.
-- Upload files to your remote SFTP storage directly from the beets prompt
-
+- Upload files to your remote SFTP storage directly from the beets prompt as well as automatically upload items following their import to the library.
 
 **Here's some crap documentation because I'm lazy, courtesy of Copilot (edited somewhat for clarification in parts)**
-
-# NavidromeSyncPlugin
-
-NavidromeSyncPlugin is a [Beets](https://beets.io/) plugin that allows you to sync your Beets library with a [Navidrome](https://navidrome.org/) music server. It can also upload your music files to a remote SFTP server.
 
 ## Installation
 
