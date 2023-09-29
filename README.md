@@ -12,7 +12,7 @@ probably broken atm in some ways, but works on Windows (lol), testing on other O
 - Upload files to your remote SFTP storage directly from the beets prompt
 
 
-**Here's some crap documentation because I'm lazy courtesy, of Copilot (edited someone for clarification)**
+**Here's some crap documentation because I'm lazy, courtesy of Copilot (edited somewhat for clarification in parts)**
 
 # NavidromeSyncPlugin
 
@@ -56,7 +56,9 @@ Once you have installed and configured the plugin, you can use the following com
 - `beet ndpull`: pull in annotation data (ratings and starred tracks) to the beets db, they'll be appeneded to a 'rating' and 'starred' field respectively. No real options for this yet.
 
 - `beet ndpush`: push annotation data and MusicBrainz data to the Navidrome DB
-The `ndpush` command of the NavidromeSyncPlugin has several command line options that you can use to customize its behavior. Here's a list of the available options:
+The `ndpush` command of the NavidromeSyncPlugin has several command line options that you can use to customize its behavior.
+
+Available options for ndpush:
 
 - `-t`, `--time`: Push directory file times to Navidrome database. This option is disabled by default.
 - `-c`, `--ctime`: Additional option for `--time`, uses created time (on Windows) rather than modified time.
