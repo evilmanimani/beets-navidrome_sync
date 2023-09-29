@@ -53,6 +53,9 @@ class SftpUploader:
             offset += part_size
 
         total_size = sum([item[0] for item in items])
+
+        self.mkdir_p(self.sftp_connect(), items[0][1][-2], is_dir=False)
+
         with tqdm(total=total_size, smoothing=0.8, unit='B', unit_scale=True, desc='Progress') as overall_pbar:
             for item in items:
                 thread = threading.Thread(target=self.upload_part, args=item[1])
@@ -68,31 +71,9 @@ class SftpUploader:
             for num in range(len(threads)):
                 threads[num].join()
 
-
     def upload_part(self, num, offset, part_size, local_path, remote_path, progress):
-        sftp_server = self.sftp_config['host']
-        port = self.sftp_config['port']
-        username = self.sftp_config['username']
-        password = self.sftp_config['password']
-
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(sftp_server, port=port, username=username, password=password)
-            transport = ssh.get_transport()
-            transport.window_size = 2147483647
-            sftp = ssh.open_sftp()
-
-            # Create directories in remote path if they don't exist
-            remote_dir = os.path.dirname(remote_path)
-            try:
-                sftp.stat(remote_dir)
-            except FileNotFoundError:
-                try:
-                    sftp.mkdir(remote_dir, mode=0o755)
-                except IOError as e:
-                    if e.errno != 17:  # Ignore "File exists" error
-                        raise e
+            sftp = self.sftp_connect()
 
             with open(local_path, "rb") as fl:
                 fl.seek(offset)
@@ -121,6 +102,25 @@ class SftpUploader:
             sftp.utime(remote_path, (local_stat.st_atime, local_stat.st_mtime))
         except (paramiko.ssh_exception.SSHException) as x:
             print(f"Thread {num} failed: {x}")
+            raise x
+
+    def sftp_connect(self):
+        try:
+            sftp_server = self.sftp_config['host']
+            port = self.sftp_config['port']
+            username = self.sftp_config['username']
+            password = self.sftp_config['password']
+    
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(sftp_server, port=port, username=username, password=password)
+            transport = ssh.get_transport()
+            transport.window_size = 2147483647
+            sftp = ssh.open_sftp()
+            return sftp
+
+        except (paramiko.ssh_exception.SSHException) as x:
+            raise x
 
     def format_dest_path(self, path):
         local_path = bytestring_path(self.sftp_config['local_directory'])
@@ -128,3 +128,29 @@ class SftpUploader:
         local = path_as_posix(path)
         dest = local.replace(local_path, dest_path)
         return dest.decode("utf-8")
+    
+    # from https://stackoverflow.com/a/20422692
+    def mkdir_p(self, sftp, remote, is_dir=False):
+        """
+        emulates mkdir_p if required. 
+        sftp - is a valid sftp object
+        remote - remote path to create. 
+        """
+        dirs_ = []
+        if is_dir:
+            dir_ = remote
+        else:
+            dir_, basename = os.path.split(remote)
+        while len(dir_) > 1:
+            dirs_.append(dir_)
+            dir_, _  = os.path.split(dir_)
+
+        if len(dir_) == 1 and not dir_.startswith("/"): 
+            dirs_.append(dir_) # For a remote path like y/x.txt 
+
+        while len(dirs_):
+            dir_ = dirs_.pop()
+            try:
+                sftp.stat(dir_)
+            except:
+                sftp.mkdir(dir_)    

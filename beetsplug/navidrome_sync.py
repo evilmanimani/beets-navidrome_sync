@@ -1,20 +1,17 @@
 '''
+This is my first beets plugin, and first time doing anything with Python, coming from Javscript and Autohotkey
+Please be gentle :)
+
 TODO:
-- Automatic upload following import option
 - Confirmation prompt for imports
+- Maybe support updating a remote db via sqlite3 commands sent to the remote server, in cases wher that's supported
 - Sync starred back to LastFM (ListenBrainz?)
-- Maybe faster SFTP upload if I can figure it out, seems capped at 500kibps ... something to do with chunks/parallelizing uploads??
-  probably not though :( [sum1 halp]
 '''
-import os
-import sys
-# Get the absolute path of the current directory
-import sqlite3, os, sys, re, datetime
-import libsonic
+import sqlite3, os, sys, re, datetime 
+from functools import partial
 import pysftp
-from functional import seq
 from beets.plugins import BeetsPlugin
-from beets.ui import (Subcommand, decargs)
+from beets.ui import (Subcommand)
 from beets import dbcore, config
 from sftpuploader import SftpUploader
 from beets.util import (bytestring_path, path_as_posix)
@@ -25,9 +22,10 @@ class NavidromeSyncPlugin(BeetsPlugin):
     def __init__(self):
         super().__init__()
         self.config.add({
-            'db_path': '',
-            'db_user': '',
+            'dbpath': '',
+            'dbuser': '',
             'temp_path': "./temp.db",
+            'pushtarget': 'local', # accepts: sftp, remote, local, or both
             "push-annotations": True,
             # 'ratingkey': 'rating',
             # 'favoritekey': 'starred',
@@ -77,7 +75,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
         upload = Subcommand('ndupload', help='Sends new tracks matching a query to remote storage')
         upload.func = self.upload
         pull = Subcommand('ndpull', help='Pulls playcounts & starred items from Navidrome')
-        pull.func = self.nd_pull
+        pull.func = partial(self.nd_sync, 'pull')
         push = Subcommand('ndpush', help='Push file times to Navidrome')
         push.parser.add_option( '-t', '--time',          action='store_true',    default=False,      help="push directory file times to Navidrome db.")
         push.parser.add_option( '-c', '--ctime',         action='store_true',    default=False,      help="additional option for --time, uses created time (on Windows) rather than modified time.")
@@ -91,40 +89,56 @@ class NavidromeSyncPlugin(BeetsPlugin):
         push.parser.add_option( '-R', '--no-ratings',    action='store_false',   dest='ratings',     help="Don't push ratings")
         push.parser.add_option( '-l', '--log',                                   dest='log_path',    help="Log missed items to file")
         push.parser.add_option( '-A', '--no-annotations',action='store_true',    default=False,      help="Don't update any annotations (play counts, ratings, starred, MusicBrainz data)")
-        push.func = self.nd_push
+        push.func = partial(self.nd_sync, 'push')
         return [push, pull, upload, nddb]
     
-    def nd_push(self, lib, opts, args):
-        if opts.time:
-            self.nd_push_file_mtime(opts.ctime, args)
-        if self.config['push-annotations']:
-            print('enabled in config')
-            if not opts.no_annotations: 
-                print('not disabled in command')
-                self.nd_push_annotations(lib, opts, args)
+    def nd_sync(self, lib, opts, args, mode):
+        
+        target = self.config['pushtarget'].as_str()
+        remoteEnabled = re.search('^(sftp|remote|both)$', target)
+        localEnabled = re.search('^(local|both)$', target)
+        for enabled, func in ((remoteEnabled, self.get_remote_db), (localEnabled, self.get_local_db)):
+            if enabled: 
+               (conn, cur) = func()
+            if not conn:
+                self._log.info(f'Unable to connect to configured DB path for function "{mode}". Exiting...')
+                continue
+            if mode == 'push':
+                if opts.time:
+                    self.nd_push_file_mtime(conn, cur, opts.ctime, args)
+                if self.config['push-annotations']:
+                    if opts.no_annotations or (not opts.mb and not opts.starred and not opts.playcounts and not opts.ratings):
+                        self._log.info("At least one of either --mb, --starred, --playcounts, or --ratings must be enabled to process!")
+                        return
+                    else:
+                        self.nd_push_annotations(conn, cur, lib, opts, args)
+            elif mode == 'pull':
+                self.nd_pull(lib, conn, cur)
         return
 
-    def nd_push_annotations(self, lib, opts, args):
-        if not opts.mb and not opts.starred and not opts.playcounts and not opts.ratings:
-            self._log.info("At least one of either --mb, --starred, --playcounts, or --ratings must be enabled to process!")
+    def get_local_db(self, *rest):
+        dbpath = self.config['dbpath'].as_str()
+        if not dbpath:
+            self._log.info('Configure a valid local dbpath to continue. Exiting...')
             return
-        db_path = self.config['db_path'].as_str()
-        if not db_path:
-            self._log.info('Configure a valid local db_path to continue. Exiting...')
-            return
-        (conn, cur) = self.db_connect(db_path)
-        if not conn:
-            self._log.info('Unable to connect to configured DB path. Exiting...')
-            return
-        user_name = self.config['db_user'].as_str()
+        return self.db_connect(dbpath)
+     
+    def get_remote_db(self, *rest):
+        local_path = self.config['temp_path'].as_str()
+        with self.sftp_connect() as sftp:
+            sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
+            return self.db_connect(local_path)
+
+    def nd_push_annotations(self, conn, cur, lib, opts, args):
+        user_name = self.config['dbuser'].as_str()
         if not user_name:
-            self._log.info('Set db_user in config to a valid Navidrome username for new or modified annotations')
+            self._log.info('Set dbuser in config to a valid Navidrome username for new or modified annotations')
             return
         cur.execute('SELECT id FROM user WHERE user_name = ?', (user_name,))
         user_id = cur.fetchone()[0]
         print(user_id)
         if not user_id:
-            self._log.info('Configured db_user username does not return a valid user_id. Exiting...')
+            self._log.info('Configured dbuser username does not return a valid user_id. Exiting...')
             return
         self._log.info('Pushing ' +
                     ('starred, ' if opts.starred else '') +
@@ -236,7 +250,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
                                             mbz_release_track_id = ?
                                         WHERE id = ?''', 
                                         (mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, id))
-            # print(f'failed to match:{artist}, {title}, {path}, {mb_trackid}')
             update_progress(total=total, matched=matched, updated=updated, missed=missed)
         print('')
         if opts.log_path is not None:
@@ -247,10 +260,10 @@ class NavidromeSyncPlugin(BeetsPlugin):
         conn.commit()
         conn.close()
 
-    def nd_push_file_mtime(self, get_ctime, args):
+    def nd_push_file_mtime(self, conn, cur, get_ctime, args):
         self._log.info('Pushing ' + ('ctime' if get_ctime else 'mtime') + ' to date-added field for media files in Navidrome DB')
         # (conn, cur) = self.get_remote_db()
-        (conn, cur) = self.db_connect(self.config['db_path'].as_str())
+        (conn, cur) = self.db_connect(self.config['dbpath'].as_str())
         items = self.collect_file_info(args) #filter list passed as tuple
         # pprint(items)
         self._log.info('Scan complete, matching files to DB entries...')
@@ -309,6 +322,9 @@ class NavidromeSyncPlugin(BeetsPlugin):
         return (conn, cur)
 
     def format_dest_path(self, path):
+        '''
+        Formats the destination path for SFTP upload, i dunno what I'm doing here, lol
+        Untested on Linux, but should work... maybe?'''
         local_path = bytestring_path(config['directory'].as_str())
         dest_path = bytestring_path(self.config['sftp']['directory'].as_str())
         local = path_as_posix(path)
@@ -317,24 +333,24 @@ class NavidromeSyncPlugin(BeetsPlugin):
     
     def upload(self, lib, opts, args):
         self.uploader.upload(lib, opts, args)
+        self._log.info('Upload complete')
     
-    def nd_api(self, lib, opts, args):
-        conn = self.subsonic_api_connect()
-        return
+    # def nd_api(self, lib, opts, args):
+    #     conn = self.subsonic_api_connect()
+    #     return
 
     # Unused at the moment
-    def subsonic_api_connect(self):
-        host = self.config['navidrome']['host'].get()
-        user = self.config['navidrome']['username'].get()
-        passw = self.config['navidrome']['password'].get()
-        port = self.config['navidrome']['port'].get()
-        if host and user and passw and port:
-            return libsonic.Connection(host , user, passw, port=port)
-        else:
-            return False
+    # def subsonic_api_connect(self):
+    #     host = self.config['navidrome']['host'].get()
+    #     user = self.config['navidrome']['username'].get()
+    #     passw = self.config['navidrome']['password'].get()
+    #     port = self.config['navidrome']['port'].get()
+    #     if host and user and passw and port:
+    #         return libsonic.Connection(host , user, passw, port=port)
+    #     else:
+    #         return False
 
-    def nd_pull(self, lib, opts, args):
-        (conn, cur) = self.get_remote_db()
+    def nd_pull(self, lib, conn, cur):
         tracks = []
         rows = dict()
         for row in cur.execute('SELECT item_id, item_type, play_count, rating, starred FROM annotation;'):
@@ -435,11 +451,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
         return total_found, total_fails
     
-    def get_remote_db(self, *rest):
-        local_path = self.config['temp_path'].as_str()
-        with self.sftp_connect() as sftp:
-            sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
-            return self.db_connect(local_path)
 
     def update_remote_db(self, *rest):
         local_path = self.config['temp_path'].as_str()
@@ -504,27 +515,3 @@ def update_progress(**kwargs): # =total, matched, updated, missed):
     sys.stdout.write(f'  --- {pad_int(matched)} of {pad_int(total)} matched ({updated_str}{pad_int(missed)} missed) - {str(int(per)).rjust(3)}% complete ---\r')
     sys.stdout.flush()
 
-# def viewBar(a,b):
-#     # original version
-#     res = a/int(b)*100
-#     sys.stdout.write('\rComplete precent: %.2f %%' % (res))
-#     sys.stdout.flush()
-
-# def tqdmWrapViewBar(*args, **kwargs):
-#     try:
-#         from tqdm import tqdm
-#     except ImportError:
-#         # tqdm not installed - construct and return dummy/basic versions
-#         class Foo():
-#             @classmethod
-#             def close(*c):
-#                 pass
-#         return viewBar, Foo
-#     else:
-#         pbar = tqdm(*args, **kwargs)  # make a progressbar
-#         last = [0]  # last known iteration, start at 0
-#         def viewBar2(a, b):
-#             pbar.total = int(b)
-#             pbar.update(int(a - last[0]))  # update pbar with increment
-#             last[0] = a  # update last known iteration
-#         return viewBar2, pbar  # return callback, qdmInstance
