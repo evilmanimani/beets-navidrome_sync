@@ -14,7 +14,7 @@ Work in progress syncing plugin between beets and Navidrome, works well enough f
 ## Installation
 
 1. Install Beets by following the instructions on the [Beets website](https://beets.io/getting-started/).
-2. Install the `pysftp` Python packages by running `pip install pysftp`.
+2. Install the `pysftp` and `tqdm` Python packages by running `pip install pysftp tqdm`.
 3. Clone this repository or download the ZIP file and extract it to a directory of your choice.
 4. Copy the `navidrome_sync` directory to your beetsplug directory.
 5. Edit your Beets configuration file (`~/.config/beets/config.yaml`) and add the following lines :
