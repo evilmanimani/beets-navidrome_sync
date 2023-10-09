@@ -58,12 +58,23 @@ class NavidromeSyncPlugin(BeetsPlugin):
             'directory': self.config['sftp']['directory'].get(),
             'local_directory': config['directory'].as_str(),
         }
-        self.uploader = SftpUploader(sftp_config, self._log)
-        if self.config['sftp']['auto'].get() and self.config['sftp']['host'].get() and self.config['sftp']['username'].get() and self.config['sftp']['password'].get() and self.config['sftp']['directory'].get():
-            self.register_listener('import_task_files', self.sftp_auto)
+        check = ['auto', 'host', 'username', 'port', 'password', 'directory']
+        self.imported_items = []
+        if all(sftp_config[k] for k in check):
+            self.uploader = SftpUploader(sftp_config, self._log)
+            if self.config['sftp']['auto'].get():
+                self.register_listener('import_task_files', self.add_imported_items)
+                self.register_listener('import', self.sftp_auto)
 
-    def sftp_auto(self, task, session):
-        items = task.items if task.is_album else [task.item] 
+    def add_imported_items(self, task):
+        if task.is_album:
+            for item in task.items():
+                self.imported_items.append(item)
+        else:
+            self.imported_items.append(task.item)
+
+    def sftp_auto(self, *rest):
+        items = self.imported_items
         self._log.info('Auto upload enabled, uploading to remote storage...')
         self.uploader.upload(items, None, None)
         self._log.info('Upload complete')
