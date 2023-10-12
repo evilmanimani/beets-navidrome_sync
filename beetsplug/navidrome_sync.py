@@ -59,7 +59,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
         }
         check = ['host', 'username', 'port', 'password', 'directory']
         self.imported_items = []
-        if self.config['sftp']['auto'] and all(k in sftp_config and sftp_config[k] for k in check):
+        if all(k in sftp_config and sftp_config[k] for k in check):
             self.uploader = SftpUploader(sftp_config, self._log)
             if self.config['sftp']['auto'].get():
                 self.register_listener('import_task_files', self.add_imported_items)
@@ -103,28 +103,32 @@ class NavidromeSyncPlugin(BeetsPlugin):
         push.func = partial(self.nd_sync, 'push')
         return [push, pull, upload, nddb]
     
-    def nd_sync(self, lib, opts, args, mode):
-        
+    def nd_sync(self, mode, lib, opts, args):
+        input('This is a destructive operation, please make sure you have a backup of your Navidrome DB before continuing. Press enter to continue...')
         target = self.config['pushtarget'].as_str()
         remoteEnabled = re.search('^(sftp|remote|both)$', target)
         localEnabled = re.search('^(local|both)$', target)
+        items = lib.items(args)
         for enabled, func in ((remoteEnabled, self.get_remote_db), (localEnabled, self.get_local_db)):
-            if enabled: 
-               (conn, cur) = func()
+            name = func.__name__
+            if name == 'get_remote_db' and not remoteEnabled: continue
+            if name == 'get_local_db' and not localEnabled: continue
+            if not enabled: continue
+            (conn, cur) = func()
             if not conn:
                 self._log.info(f'Unable to connect to configured DB path for function "{mode}". Exiting...')
                 continue
-            if mode == 'push':
-                if opts.time:
-                    self.nd_push_file_mtime(conn, cur, opts.ctime, args)
-                if self.config['push-annotations']:
-                    if opts.no_annotations or (not opts.mb and not opts.starred and not opts.playcounts and not opts.ratings):
-                        self._log.info("At least one of either --mb, --starred, --playcounts, or --ratings must be enabled to process!")
-                        return
-                    else:
-                        self.nd_push_annotations(conn, cur, lib, opts, args)
-            elif mode == 'pull':
-                self.nd_pull(lib, conn, cur)
+            else:
+                if mode == 'push':
+                    self.nd_push_annotations(conn, cur, items, opts)
+                    conn.commit()
+                elif mode == 'pull':
+                    self.nd_pull(lib, conn, cur)
+                conn.close()
+                conn = None
+                cur = None
+                if name == 'get_remote_db':
+                    self.update_remote_db()
         return
 
     def get_local_db(self, *rest):
@@ -140,7 +144,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             sftp.get(self.config['sftp']['dbpath'].as_str(), local_path)
             return self.db_connect(local_path)
 
-    def nd_push_annotations(self, conn, cur, lib, opts, args):
+    def nd_push_annotations(self, conn, cur, items, opts):
         user_name = self.config['dbuser'].as_str()
         if not user_name:
             self._log.info('Set dbuser in config to a valid Navidrome username for new or modified annotations')
@@ -152,14 +156,15 @@ class NavidromeSyncPlugin(BeetsPlugin):
             self._log.info('Configured dbuser username does not return a valid user_id. Exiting...')
             return
         self._log.info('Pushing ' +
-                    ('starred, ' if opts.starred else '') +
-                    ('play-counts, ' if opts.playcounts else '') +
-                    ('ratings, ' if opts.ratings else '') +
-                    ('musicbrainz data, ' if opts.mb else '') +
-                    'to Navidrome DB'                         
+                    ('starred, ' if opts.starred and not opts.no_annotations else '') +
+                    ('play-counts, ' if opts.playcounts and not opts.no_annotations else '') +
+                    ('ratings, ' if opts.ratings and not opts.no_annotations else '') +
+                    ('musicbrainz data, ' if opts.mb and not opts.no_annotations else '') +
+                    ('modified time, ' if opts.time else '') +
+                    'to Navidrome DB'
         )
         all_items = []
-        for i in lib.items(args):
+        for i in items:
             all_items.append((
                 i['path'].decode('utf-8'),
                 i['artist'],
@@ -187,7 +192,6 @@ class NavidromeSyncPlugin(BeetsPlugin):
         missed = 0
         missed_log = []
         ids = []
-        paths = []
         local_path = config['directory'].as_str()
         for (
                 path, 
@@ -206,51 +210,53 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 starred, 
                 mtime
             ) in all_items:
+            utc = convert_time(mtime)
+            utc_m = utc.replace('Z', '.000000000Z')
             path = path.replace('\\', '/').replace(local_path, '')
-            cur.execute(''' SELECT id, updated_at, mbz_track_id
+            cur.execute(''' SELECT id
                             FROM media_file 
                             WHERE (mbz_track_id = ?)
                             OR (path LIKE ?)
                             OR (artist = ? AND title = ?);''',
                         (mb_trackid, artist, title, f'%{path}%'))
             needle = [artist, albumartist, album, title]
-            (id, updated_at, mbz_track_id) = cur.fetchone() or self.fuzzy_search(needle, cur)
+            id = cur.fetchone() or self.fuzzy_search(needle, cur)
+            id = len(id) > 0 and id[0] or None
             if not id:
                 missed += 1
                 missed_log.append(f'missed:{artist},{title},{path},{mb_trackid}')
             else:
                 matched += 1
-                if path not in paths and id not in ids and (opts.starred or opts.playcounts or opts.ratings):
+                if id not in ids:
                     updated += 1
-                    paths.append(path)
                     ids.append(id)
-                    updated_at = re.sub("T|Z", " ", updated_at).strip()
-                    mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if starred and opts.starred else "NULL"
-                    starred = 1 if starred == 'True' and opts.starred else 0
-                    rating = rating if opts.ratings else 0
-                    play_count = play_count if opts.playcounts else 0
                     cur.execute('SELECT ann_id FROM annotation WHERE item_id = ?', (id,))
                     rows = cur.fetchall()
-                    if len(rows) == 0:
-                        cur.execute(''' INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
-                                        VALUES  (lower(hex(randomblob(4))) || '-' || 
-                                                lower(hex(randomblob(2))) || '-4' || 
-                                                substr(lower(hex(randomblob(2))),2) || '-' || 
-                                                substr('89ab',abs(random()) % 4 + 1, 1) || 
-                                                substr(lower(hex(randomblob(2))),2) || '-' || 
-                                                lower(hex(randomblob(6))),
-                                                ?, ?, "media_file", ?, NULL, ?, ?, ?);''',
-                                            (user_id, id, play_count, rating, starred, mtime))
-                    else:
-                        cur.execute(''' UPDATE annotation 
-                                        SET starred = ?, 
-                                            starred_at = ?, 
-                                            play_count = ?,
-                                            rating = ? 
-                                        WHERE item_id = ?
-                                        AND user_id = ?
-                                        AND item_type = "media_file";'''
-                                    , (starred, mtime, play_count, rating, id, user_id))
+                    if (opts.starred or opts.playcounts or opts.ratings):
+                        mtime = re.sub("T|Z", " ", convert_time(mtime)).strip() if starred and opts.starred else "NULL"
+                        starred = 1 if starred == 'True' and opts.starred else 0
+                        rating = rating if opts.ratings else 0
+                        play_count = play_count if opts.playcounts else 0
+                        if len(rows) == 0:
+                            cur.execute(''' INSERT into annotation (ann_id, user_id, item_id, item_type, play_count, play_date, rating, starred, starred_at)
+                                            VALUES  (lower(hex(randomblob(4))) || '-' || 
+                                                    lower(hex(randomblob(2))) || '-4' || 
+                                                    substr(lower(hex(randomblob(2))),2) || '-' || 
+                                                    substr('89ab',abs(random()) % 4 + 1, 1) || 
+                                                    substr(lower(hex(randomblob(2))),2) || '-' || 
+                                                    lower(hex(randomblob(6))),
+                                                    ?, ?, "media_file", ?, NULL, ?, ?, ?);''',
+                                                (user_id, id, play_count, rating, starred, mtime))
+                        else:
+                            cur.execute(''' UPDATE annotation 
+                                            SET starred = ?, 
+                                                starred_at = ?, 
+                                                play_count = ?,
+                                                rating = ? 
+                                            WHERE item_id = ?
+                                            AND user_id = ?
+                                            AND item_type = "media_file";'''
+                                        , (starred, mtime, play_count, rating, id, user_id))
                     if opts.mb: 
                         cur.execute(''' UPDATE media_file
                                         SET mbz_track_id = ?,
@@ -261,6 +267,17 @@ class NavidromeSyncPlugin(BeetsPlugin):
                                             mbz_release_track_id = ?
                                         WHERE id = ?''', 
                                         (mb_trackid, mb_albumid, mb_artistid, mb_albumartistid, albumtype, mb_releasetrackid, id))
+                    if opts.time:
+                        cur.execute('SELECT album_id FROM media_file WHERE id = ?', (id,))
+                        album_id = cur.fetchone()[0]
+                        cur.execute(''' UPDATE media_file 
+                                        SET updated_at = ?, created_at = ?
+                                        WHERE id = ?''',
+                                        (utc, utc_m, id))
+                        cur.execute(''' UPDATE album
+                                        SET updated_at = ?, created_at = ?
+                                        WHERE id = ?''',
+                                        (utc, utc_m, album_id))
             update_progress(total=total, matched=matched, updated=updated, missed=missed)
         print('')
         if opts.log_path is not None:
@@ -268,50 +285,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             f.write('\r\n'.join(missed_log))
             f.close()
         self._log.info('Navidrome push complete')
-        conn.commit()
-        conn.close()
 
-    def nd_push_file_mtime(self, conn, cur, get_ctime, args):
-        self._log.info('Pushing ' + ('ctime' if get_ctime else 'mtime') + ' to date-added field for media files in Navidrome DB')
-        # (conn, cur) = self.get_remote_db()
-        (conn, cur) = self.db_connect(self.config['dbpath'].as_str())
-        items = self.collect_file_info(args) #filter list passed as tuple
-        # pprint(items)
-        self._log.info('Scan complete, matching files to DB entries...')
-        time_index = 2 if get_ctime else 1
-        albumIDs = []
-        total = len(items)
-        matched = 0
-        missed = 0
-        for item in items:
-            path = item[0]
-            utc = item[time_index]
-            utc_m = utc.replace('Z', '.000000000Z')
-            cur.execute(
-                ''' UPDATE media_file 
-                    SET updated_at = :utc, created_at = :utc_m
-                    WHERE path LIKE :path;''',
-                {"utc": utc, "utc_m": utc_m, "path": f'%{path}%'}
-            )
-            cur.execute(f'SELECT album_id FROM media_file WHERE path LIKE "%{path}%";')
-            row = cur.fetchone()
-            if row:
-                matched += 1
-                albumID = row[0]
-                if albumID not in albumIDs:
-                    albumIDs.append(albumID)
-                    cur.execute(
-                            ''' UPDATE album
-                                SET updated_at = :utc, created_at = :utc_m
-                                WHERE id = :id;''',
-                                { "utc": utc, "utc_m": utc_m, "id": albumID }
-                            )
-            else: missed += 1 
-            update_progress(total=total, matched=matched, missed=missed)
-        conn.commit()
-        conn.close()
-        print('')
-    
     def sftp_connect(self):
         cnopts = pysftp.CnOpts()
         cnopts.hostkeys = None
@@ -465,9 +439,8 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
     def update_remote_db(self, *rest):
         local_path = self.config['temp_path'].as_str()
-        with self.sftp_connect() as sftp:
-            self.sftp_upload(sftp, local_path, (self.config['sftp']['dbpath'].as_str()))
-            self._log.info('Remote DB updated, complete a full refresh in Navidrome for changes to take effect')
+        self.uploader.upload_file(local_path, self.config['sftp']['dbpath'].as_str())
+        self._log.info('Remote DB updated, complete a full refresh in Navidrome for changes to take effect')
         return
 
     def fuzzy_search(self, needle, cur):
@@ -489,32 +462,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
                 return(rest)                
         return (None, None, None)
 
-    def collect_file_info(self, filter_list=()):
-        directory = config['directory'].as_str()
-        file_info_list = []
-        re_image = re.compile(r'\.(png|jpe?g|gif)$', re.I)
-        matched = 0
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                match = False
-                file_path = os.path.join(root, file)
-                # print (file_path)
-                # Get the file creation time (metadata may not be available on all platforms)
-                try: created_time = convert_time(os.path.getctime(file_path))
-                except OSError: created_time = None
-                try: modified_time = convert_time(os.path.getmtime(file_path))
-                except OSError: modified_time = None                
-                if filter_list:
-                    match = len(list(filter(lambda e: e.casefold() in file_path.casefold(), filter_list))) > 0 and not re.search(re_image, file)
-                else: match = True
-                if match: 
-                    matched += 1
-                    file_info_list.append((file, modified_time, created_time))
-                sys.stdout.write(f'  --- Scanning music directory: found {str(matched).ljust(6)} ---\r')
-                sys.stdout.flush()
-        print('')
-        return file_info_list                    
-
+def convert_iso_time(t): return datetime.datetime.fromisoformat(t).astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
 def convert_time(t): return datetime.datetime.fromtimestamp(int(t), tz=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
 
 def update_progress(**kwargs): # =total, matched, updated, missed):
@@ -525,4 +473,3 @@ def update_progress(**kwargs): # =total, matched, updated, missed):
     updated_str = f'{pad_int(updated)} updated, ' if updated is not None else ''
     sys.stdout.write(f'  --- {pad_int(matched)} of {pad_int(total)} matched ({updated_str}{pad_int(missed)} missed) - {str(int(per)).rjust(3)}% complete ---\r')
     sys.stdout.flush()
-

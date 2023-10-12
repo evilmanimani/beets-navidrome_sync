@@ -19,23 +19,28 @@ class SftpUploader:
         else:
             items = lib.items(decargs(args))
         # albumart = set()
+        artpath = None
         to_upload = []
         for i in items:
+            if not artpath and i['artpath']:
+                artpath = i['artpath']
+                size = os.path.getsize(artpath)  # Calculate size of cover art
+                to_upload.append((artpath))
             local = i['path']
-            size = os.path.getsize(local)  # Calculate size of audio file
-            to_upload.append((local, size))
+            to_upload.append((local))
         
-        if items[0]['artpath']:
-            local = items[0]['artpath']
-            size = os.path.getsize(local)  # Calculate size of cover art
-            to_upload.append((local, size))
+        # if items[0]['artpath']:
+        #     local = items[0]['artpath']
+        #     size = os.path.getsize(local)  # Calculate size of cover art
+        #     to_upload.append((local, size))
 
         for local, size in to_upload: 
             print(f"Uploading {local.decode('utf-8')} to {str(self.format_dest_path(local))}")
             self.upload_file(local, size)
 
 
-    def upload_file(self, local, size):
+    def upload_file(self, local, dest = None):
+        size = os.path.getsize(local)  # Calculate size of file
         threads_count = 6 
         part_size = int(size / threads_count)
         self.lock = threading.Lock()
@@ -48,7 +53,7 @@ class SftpUploader:
         for num in range(threads_count):
             if num == threads_count - 1:
                 part_size = size - offset
-            args = [num, offset, part_size, local, self.format_dest_path(local), progress]
+            args = [num, offset, part_size, local, dest or self.format_dest_path(local), progress]
             items.append((part_size, args))
             offset += part_size
 
