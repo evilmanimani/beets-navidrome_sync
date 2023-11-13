@@ -2,7 +2,7 @@
 Work in progress syncing plugin between beets and Navidrome, works well enough for my own use on Windows, needs testing on *nix.
 
  **So far, it can do the following:**
-- Recursively scan your music folder, grab all the modified (or created (on Windows only apparently??)), and update your Navidrome Created/Updated times to these dates, i.e. set your 'Recently added' order to that of file creation
+- Recursively scan your music folder, grab all the modified (or created (on Windows only apparently??)) timestamps, and update your Navidrome Created/Updated times to these dates, i.e. set your 'Recently added' order to that of file creation
 - will modfiy a local navidrome.db file, or connect over SFTP and download a copy to modify as well (works well with Pikapods)
 - 2 way syncing - either push, or pull annotations (starred, play counts, ratings) between Navidrome and beets
 - Push MusicBrainz metadata into the Navidrome DB
