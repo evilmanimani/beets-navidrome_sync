@@ -5,3 +5,4 @@ __pycache__
 *.txt
 *wal
 *shm
+setup.py

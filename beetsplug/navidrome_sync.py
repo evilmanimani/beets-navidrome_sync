@@ -147,7 +147,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
     def nd_push_annotations(self, conn, cur, items, opts):
         user_name = self.config['dbuser'].as_str()
         if not user_name:
-            self._log.info('Set dbuser in config to a valid Navidrome username for new or modified annotations')
+            self._og.info('Set dbuser in config to a valid Navidrome username for new or modified annotations')
             return
         cur.execute('SELECT id FROM user WHERE user_name = ?', (user_name,))
         user_id = cur.fetchone()[0]
@@ -215,7 +215,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
             path = path.replace('\\', '/').replace(local_path, '')
             cur.execute(''' SELECT id
                             FROM media_file 
-                            WHERE (mbz_track_id = ?)
+                            WHERE (mbz_recording_id = ?)
                             OR (path LIKE ?)
                             OR (artist = ? AND title = ?);''',
                         (mb_trackid, artist, title, f'%{path}%'))
@@ -259,7 +259,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
                                         , (starred, mtime, play_count, rating, id, user_id))
                     if opts.mb: 
                         cur.execute(''' UPDATE media_file
-                                        SET mbz_track_id = ?,
+                                        SET mbz_recording_id = ?,
                                             mbz_album_id = ?,
                                             mbz_artist_id = ?,
                                             mbz_album_artist_id = ?,
@@ -340,7 +340,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
         rows = dict()
         for row in cur.execute('SELECT item_id, item_type, play_count, rating, starred FROM annotation;'):
             rows[row[0]] = row
-        for (item_id, artist, albumArtist, album, title, mb_trackid) in cur.execute('SELECT id, artist, album_artist, album, title, mbz_track_id FROM media_file;'):
+        for (item_id, artist, albumArtist, album, title, mb_trackid) in cur.execute('SELECT id, artist, album_artist, album, title, mbz_recording_id FROM media_file;'):
             playCount = 0
             rating = 0
             starred = 0
@@ -361,6 +361,7 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
     # Shamelessly lifted process_tracks func from lastimport.py, with some modification
     def process_navidrome_annotations(self, lib, tracks, log):
+        input('Press Enter to continue...')
         total = len(tracks)
         total_found = 0
         total_fails = 0
@@ -380,9 +381,12 @@ class NavidromeSyncPlugin(BeetsPlugin):
 
             # Try with previously saved Navidrome item id
             if item_id:
-                song = lib.items(
-                    dbcore.query.MatchQuery('nd_item_id', item_id)
-                ).get()
+                try:
+                    song = lib.items(
+                        dbcore.query.MatchQuery('nd_item_id', item_id)
+                    ).get()
+                except:
+                    log.debug('no item_id match')
 
             # Then try to query by musicbrainz's trackid
             if song is None and trackid:
@@ -446,12 +450,12 @@ class NavidromeSyncPlugin(BeetsPlugin):
     def fuzzy_search(self, needle, cur):
         '''
         compares each string segment of the needle to the 'full_text' db field
-        if all segments are found: returns tuple of (id, updated_at, mbz_track_id)
+        if all segments are found: returns tuple of (id, updated_at, mbz_recording_id)
         returns (None, None, None) if not
         '''
         haystack_re = re.compile('[^a-zA-Z0-9A-zÀ-ÖØ-öø-įĴ-őŔ-žǍ-ǰǴ-ǵǸ-țȞ-ȟȤ-ȳɃɆ-ɏḀ-ẞƀ-ƓƗ-ƚƝ-ơƤ-ƥƫ-ưƲ-ƶẠ-ỿ\s]', re.MULTILINE) # should catch all all diacritics?? i dunno
         haystack = []
-        for (t, i, u, m) in cur.execute('SELECT full_text, id, updated_at, mbz_track_id FROM media_file;'):
+        for (t, i, u, m) in cur.execute('SELECT full_text, id, updated_at, mbz_recording_id FROM media_file;'):
             haystack.append((t, i, u, m)) 
         if needle[0] == needle[1]: # artist & album artist are passed as first two items of list
             needle.pop()
